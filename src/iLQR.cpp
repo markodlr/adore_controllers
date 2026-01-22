@@ -41,7 +41,7 @@ iLQR::initialize_matrices( int T )
 
 double
 iLQR::calculate_cost( const dynamics::VehicleStateDynamic& x_ref, const dynamics::VehicleStateDynamic& xt,
-                      const dynamics::VehicleCommand& u, const dynamics::VehicleCommand& u_prev )
+                      const dynamics::VehicleCommand& u, const dynamics::VehicleCommand& u_prev, bool is_first_step )
 {
   // Compute reference direction (unit vector in x_ref direction)
   double ref_cos = std::cos( x_ref.yaw_angle );
@@ -66,6 +66,14 @@ iLQR::calculate_cost( const dynamics::VehicleStateDynamic& x_ref, const dynamics
                       + vel_weight * dv * dv + acc_weight * u.acceleration * u.acceleration
                       + steer_weight * u.steering_angle * u.steering_angle + heading_weight * dyaw * dyaw + jerk_weight * jerk * jerk
                       + steer_rate_weight * steering_rate * steering_rate;
+
+  // Add initial control deviation penalty for first step
+  if( is_first_step )
+  {
+    double accel_deviation = u.acceleration - u_prev.acceleration;
+    double steer_deviation = u.steering_angle - u_prev.steering_angle;
+    current_cost += initial_control_weight * ( accel_deviation * accel_deviation + steer_deviation * steer_deviation );
+  }
 
   return current_cost * dt;
 }
@@ -111,6 +119,15 @@ iLQR::compute_cost_derivatives( const int T, adore::dynamics::Trajectory& x_traj
     {
       l_u( 0 ) = ( 2.0 * acc_weight * ut.acceleration + 2.0 * jerk_weight * jerk ) * dt;
       l_u( 1 ) = ( 2.0 * steer_weight * ut.steering_angle + 2.0 * steer_rate_weight * steering_rate ) * dt;
+
+      // Add initial control deviation gradient for first step
+      if( t == 0 )
+      {
+        double accel_deviation = ut.acceleration - prev_u.acceleration;
+        double steer_deviation = ut.steering_angle - prev_u.steering_angle;
+        l_u( 0 ) += 2.0 * initial_control_weight * accel_deviation * dt;
+        l_u( 1 ) += 2.0 * initial_control_weight * steer_deviation * dt;
+      }
     }
 
     // Hessians, scaled by dt
@@ -125,6 +142,13 @@ iLQR::compute_cost_derivatives( const int T, adore::dynamics::Trajectory& x_traj
     {
       l_uu( 0, 0 ) = ( 2.0 * acc_weight + 2.0 * jerk_weight ) * dt;
       l_uu( 1, 1 ) = ( 2.0 * steer_weight + 2.0 * steer_rate_weight ) * dt;
+
+      // Add initial control deviation Hessian for first step
+      if( t == 0 )
+      {
+        l_uu( 0, 0 ) += 2.0 * initial_control_weight * dt;
+        l_uu( 1, 1 ) += 2.0 * initial_control_weight * dt;
+      }
     }
 
     l_x_list[t]  = l_x;
@@ -163,6 +187,8 @@ iLQR::set_parameters( const std::map<std::string, double>& params )
       longitudinal_weight = value; // Set longitudinal weight
     else if( name == "lateral_weight" )
       lateral_weight = value; // Set lateral weight
+    else if( name == "initial_control_weight" )
+      initial_control_weight = value;
     else if( name == "debug active" )
       debug_active = static_cast<bool>( value );
 
@@ -208,9 +234,9 @@ iLQR::get_next_vehicle_command( const dynamics::Trajectory& in_trajectory, const
     double total_cost = 0.0;
     for( size_t t = 0; t < T - 1; ++t )
     {
-      const dynamics::VehicleCommand& u_prev  = ( t > 0 ) ? u_traj[t - 1]
-                                                          : dynamics::VehicleCommand( current_state.steering_angle, current_state.ax );
-      total_cost                             += calculate_cost( ref_trajectory.states[t], x_traj.states[t], u_traj[t], u_prev );
+      const dynamics::VehicleCommand& u_prev = ( t > 0 ) ? u_traj[t - 1]
+                                                         : dynamics::VehicleCommand( current_state.steering_angle, current_state.ax );
+      total_cost += calculate_cost( ref_trajectory.states[t], x_traj.states[t], u_traj[t], u_prev, t == 0 );
     }
 
     // Check convergence
@@ -308,10 +334,10 @@ iLQR::line_search( double& line_step, const double min_step, const int T, const 
       dx( 2 )            = x_traj_new.states[t].yaw_angle - x_traj.states[t].yaw_angle;
       dx( 3 )            = x_traj_new.states[t].vx - x_traj.states[t].vx;
 
-      Eigen::VectorXd          du     = k_list[t] + K_list[t] * dx;
-      dynamics::VehicleCommand u_new  = u_traj[t];
-      u_new.acceleration             += line_step * du[0];
-      u_new.steering_angle           += line_step * du[1];
+      Eigen::VectorXd          du    = k_list[t] + K_list[t] * dx;
+      dynamics::VehicleCommand u_new = u_traj[t];
+      u_new.acceleration += line_step * du[0];
+      u_new.steering_angle += line_step * du[1];
 
       // Apply control limits if necessary
       u_new.clamp_within_limits( model.params );
@@ -321,17 +347,17 @@ iLQR::line_search( double& line_step, const double min_step, const int T, const 
       x_traj_new.states[t + 1] = dynamics::integrate_euler( x_traj_new.states[t], u_new, dt, model.motion_model );
 
       // Calculate predicted decrease as -grad(J) * du * line_step
-      Eigen::VectorXd grad_J  = l_u_list[t]; // Gradient of cost wrt control at time t
-      predicted_decrease     += grad_J.dot( du ) * line_step;
+      Eigen::VectorXd grad_J = l_u_list[t]; // Gradient of cost wrt control at time t
+      predicted_decrease += grad_J.dot( du ) * line_step;
     }
 
     // Compute new total cost
     double new_total_cost = 0.0;
     for( int t = 0; t < T - 1; ++t )
     {
-      const dynamics::VehicleCommand& u_prev  = ( t > 0 ) ? u_traj[t - 1]
-                                                          : dynamics::VehicleCommand( current_state.steering_angle, current_state.ax );
-      new_total_cost                         += calculate_cost( ref_trajectory.states[t], x_traj_new.states[t], u_traj_new[t], u_prev );
+      const dynamics::VehicleCommand& u_prev = ( t > 0 ) ? u_traj_new[t - 1]
+                                                         : dynamics::VehicleCommand( current_state.steering_angle, current_state.ax );
+      new_total_cost += calculate_cost( ref_trajectory.states[t], x_traj_new.states[t], u_traj_new[t], u_prev, t == 0 );
     }
 
     // Armijo condition: Check if the reduction is sufficient
@@ -392,8 +418,8 @@ iLQR::backward_pass( const int T )
       // Ensure Q_uu_reg is positive definite by adding small regularization if necessary
       while( cached_cholesky.info() != Eigen::Success )
       {
-        Q_uu_reg        += Eigen::MatrixXd::Identity( n_u, n_u ) * 1e-6;
-        cached_cholesky  = Q_uu_reg.llt();
+        Q_uu_reg += Eigen::MatrixXd::Identity( n_u, n_u ) * 1e-6;
+        cached_cholesky = Q_uu_reg.llt();
       }
     }
 

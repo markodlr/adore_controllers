@@ -34,18 +34,19 @@ class iLQR
 {
 private:
 
-  size_t horizon_steps         = 30;  // Number of time steps
-  double dt                    = 0.1; // Time step duration
-  double heading_weight        = 10.0;
-  double lateral_weight        = 10.0;
-  double longitudinal_weight   = 1.0;
-  double vel_weight            = 10.0; // Velocity tracking weight
-  double acc_weight            = 0.01; // Acceleration penalty weight
-  double steer_weight          = 0.1;  // Steering penalty weight
-  double jerk_weight           = 1.0;
-  double steer_rate_weight     = 1.0;
-  double convergence_threshold = 1e-6;
-  size_t max_iterations        = 100;
+  size_t horizon_steps          = 30;  // Number of time steps
+  double dt                     = 0.1; // Time step duration
+  double heading_weight         = 10.0;
+  double lateral_weight         = 10.0;
+  double longitudinal_weight    = 1.0;
+  double vel_weight             = 10.0; // Velocity tracking weight
+  double acc_weight             = 0.01; // Acceleration penalty weight
+  double steer_weight           = 0.1;  // Steering penalty weight
+  double jerk_weight            = 5.0;
+  double steer_rate_weight      = 1.0;
+  double initial_control_weight = 40.0; // Penalty for initial control deviation from current state
+  double convergence_threshold  = 1e-6;
+  size_t max_iterations         = 100;
 
   // Initialize variables for the backward pass
   std::vector<Eigen::MatrixXd> A_list;
@@ -68,7 +69,7 @@ private:
   void initialize_matrices( int T );
 
   double calculate_cost( const dynamics::VehicleStateDynamic& x_ref, const dynamics::VehicleStateDynamic& xt,
-                         const dynamics::VehicleCommand& u, const dynamics::VehicleCommand& u_prev );
+                         const dynamics::VehicleCommand& u, const dynamics::VehicleCommand& u_prev, bool is_first_step = false );
 
   bool line_search( double& line_step, const double min_step, const int T, const adore::dynamics::VehicleStateDynamic& current_state,
                     adore::dynamics::Trajectory& x_traj, std::vector<adore::dynamics::VehicleCommand>& u_traj,
@@ -95,7 +96,7 @@ public:
   dynamics::Trajectory                  previous_traj;
   void                                  warm_start( std::vector<adore::dynamics::VehicleCommand>& u_traj );
 
-  iLQR() {};
+  iLQR(){};
 
   void set_parameters( const std::map<std::string, double>& params );
 
